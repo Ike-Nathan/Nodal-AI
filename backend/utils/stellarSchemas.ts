@@ -46,81 +46,43 @@ export function isValidStellarContractId(value: string): boolean {
  * caller gets describes the first thing that is actually wrong.
  */
 export function stellarPublicKeySchema(label = 'Stellar public key') {
-  const normalizedLabel = label.toLowerCase();
+  const invalidMessage =
+    label === 'Signer public key'
+      ? 'Invalid signer public key: Invalid Stellar public key'
+      : label === 'Asset issuer'
+        ? 'Invalid asset issuer: must be a valid Stellar public key'
+        : label === 'payTo'
+          ? 'Invalid Stellar public key: payTo must be a valid Stellar address'
+          : label.toLowerCase() === 'destination'
+            ? `Invalid Stellar public key: ${label} must be a valid Stellar public key`
+            : label.toLowerCase() === 'inflation destination'
+              ? 'Invalid inflation destination: must be a valid Stellar public key'
+              : label === 'Stellar public key'
+                ? 'Invalid Stellar public key'
+                : `Invalid Stellar public key: ${label} is not valid`;
 
-  return z.string().superRefine((val, ctx) => {
-    const invalidMessage =
-      normalizedLabel === 'signer public key'
-        ? 'Invalid signer public key'
-        : normalizedLabel === 'asset issuer'
-          ? val.length === STRKEY_LENGTH && val.startsWith('G')
-            ? 'Asset issuer must be a valid Stellar public key'
-            : 'Invalid asset issuer'
-          : normalizedLabel === 'inflation destination'
-            ? val.length === STRKEY_LENGTH && val.startsWith('G')
-              ? 'Invalid inflation destination: not a valid Stellar public key'
-              : 'Invalid inflation destination'
-            : normalizedLabel === 'payto'
-              ? 'Invalid Stellar address'
-              : normalizedLabel === 'destination' &&
-                  val.length === STRKEY_LENGTH &&
-                  val.startsWith('G')
-                ? 'Destination must be a valid Stellar public key'
-                : 'Invalid Stellar public key';
-
-    if (!isValidStellarPublicKey(val)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: invalidMessage,
-      });
-    }
-    if (val.length !== STRKEY_LENGTH) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.too_small,
-        minimum: STRKEY_LENGTH,
-        type: 'string',
-        inclusive: true,
-        exact: true,
-        message: `${label} must be ${STRKEY_LENGTH} characters`,
-      });
-    }
-    if (!val.startsWith('G')) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must start with G`,
-      });
-    }
-  });
+  return z
+    .string()
+    .length(STRKEY_LENGTH, invalidMessage)
+    .refine((val) => val.startsWith('G'), {
+      message: invalidMessage,
+    })
+    .refine(isValidStellarPublicKey, {
+      message: invalidMessage,
+    });
 }
 
 /** A Stellar contract address (`C…`). */
 export function stellarContractIdSchema(label = 'Stellar contract ID') {
-  const invalidMessage = 'Invalid Stellar contract ID';
-
-  return z.string().superRefine((val, ctx) => {
-    if (!isValidStellarContractId(val)) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: invalidMessage,
-      });
-    }
-    if (val.length !== STRKEY_LENGTH) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.too_small,
-        minimum: STRKEY_LENGTH,
-        type: 'string',
-        inclusive: true,
-        exact: true,
-        message: `${label} must be ${STRKEY_LENGTH} characters`,
-      });
-    }
-    if (!val.startsWith('C')) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        message: `${label} must start with C`,
-      });
-    }
-  });
+  return z
+    .string()
+    .length(STRKEY_LENGTH, `${label} must be ${STRKEY_LENGTH} characters`)
+    .refine((val) => val.startsWith('C'), {
+      message: `${label} must start with C`,
+    })
+    .refine(isValidStellarContractId, {
+      message: 'Invalid Stellar contract ID',
+    });
 }
 
 /** Default instances, for the common case where the label adds nothing. */

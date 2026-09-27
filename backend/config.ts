@@ -23,11 +23,12 @@ import { Keypair } from '@stellar/stellar-sdk';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { isValidStellarPublicKey } from './utils/stellarSchemas';
 
+export const MAINNET_SPENDING_CAP = 10_000;
+
 // Load .env file (no-op when running in CI / production with real env vars)
 dotenv.config();
 
 // ─── Custom Zod refinements ───────────────────────────────────────────────────
-
 
 /**
  * Validates a Stellar secret key (S…, 56 chars, base32).
@@ -293,7 +294,7 @@ export interface AgentConfig {
    * Spending window in milliseconds for rate/cap computation.
    * Defines the time window over which spending is tracked and enforced.
    * Validated by EnvSchema to be a positive integer.
-   * Defaults to 60,000 (1 minute).
+   * Defaults to 86,400,000 (24 hours).
    */
   readonly SPENDING_WINDOW_MS: number;
   /**
@@ -398,12 +399,34 @@ function parseConfigAndDerive(): AgentConfig {
     process.stderr.write(
       `\n❌ [Config] Invalid environment — fix the following before starting:\n` +
         formatValidationErrors(result.error) +
-        `\n\nSee ..env for reference.\n\n`
+        `\n\nSee .env for reference.\n\n`
     );
     process.exit(1);
   }
 
   const raw: RawEnv = result.data;
+
+  // ── Mainnet HTTPS enforcement ──────────────────────────────────────────────
+  // On mainnet, both RPC endpoints MUST use HTTPS to prevent credential/data
+  // exposure over unencrypted connections. Testnet and futurenet permit HTTP
+  // for local devnets and CI environments.
+  if (raw.STELLAR_NETWORK === "mainnet") {
+    const httpsErrors: string[] = [];
+    if (!raw.HORIZON_URL.startsWith("https://")) {
+      httpsErrors.push(`  • HORIZON_URL: must use HTTPS on mainnet (got: ${raw.HORIZON_URL})`);
+    }
+    if (!raw.SOROBAN_RPC_URL.startsWith("https://")) {
+      httpsErrors.push(`  • SOROBAN_RPC_URL: must use HTTPS on mainnet (got: ${raw.SOROBAN_RPC_URL})`);
+    }
+    if (httpsErrors.length > 0) {
+      process.stderr.write(
+        `\n❌ [Config] Mainnet requires HTTPS for all RPC endpoints:\n` +
+        httpsErrors.join("\n") +
+        `\n\nSee .env.example for reference.\n\n`
+      );
+      process.exit(1);
+    }
+  }
 
   // ── Derive public key from secret ──────────────────────────────────────────
   let keypair: Keypair;
@@ -429,10 +452,10 @@ function parseConfigAndDerive(): AgentConfig {
   // ── Mainnet safety guard ───────────────────────────────────────────────────
   if (raw.STELLAR_NETWORK === 'mainnet') {
     const limit = parseFloat(raw.AGENT_SPENDING_LIMIT);
-    if (limit > 10_000) {
+    if (limit > MAINNET_SPENDING_CAP) {
       process.stderr.write(
         `❌ [Config] AGENT_SPENDING_LIMIT (${raw.AGENT_SPENDING_LIMIT}) exceeds ` +
-          `the mainnet safety cap of 10,000. Lower it or explicitly override.\n`
+          `the mainnet safety cap of ${MAINNET_SPENDING_CAP.toLocaleString('en-US')}. Lower it or explicitly override.\n`
       );
       process.exit(1);
     }
@@ -441,7 +464,6 @@ function parseConfigAndDerive(): AgentConfig {
   // ── Build the config object — secret key stays in closure only ────────────
   const {
     AGENT_SECRET_KEY: _secret,
-    AGENT_PUBLIC_KEY: _rawPub,
     ALLOWED_X402_ORIGINS,
     AGENT_SECRET_KEY_ARN,
     OTLP_ENDPOINT,
@@ -455,7 +477,6 @@ function parseConfigAndDerive(): AgentConfig {
   // Derive the keypair once at startup. agentKeypair returns this cached instance
   // on every call, avoiding repeated Ed25519 derivation.
   const _keypair = Keypair.fromSecret(_secret);
-  const _secretRef = _secret;
 
   const cfg: AgentConfig = {
     ...rest,
@@ -475,12 +496,6 @@ function parseConfigAndDerive(): AgentConfig {
     // Secret is captured in closure; never on the object
     agentKeypair: () => _keypair,
   };
-
-  // Allow GC of the secret string now that the keypair is materialised.
-  // (JS strings are immutable, but this signals intent.)
-  (() => {
-    const _ = _secretRef;
-  })();
 
   // Startup banner — only safe fields
   process.stdout.write(
@@ -554,61 +569,51 @@ export async function loadConfig(): Promise<AgentConfig> {
 let _config: AgentConfig | null = null;
 let _configError: Error | null = null;
 
-async function initializeConfig(): Promise<AgentConfig> {
-  if (_config) return _config;
-  if (_configError) throw _configError;
-
+// Synchronous default initialization if AGENT_SECRET_KEY is defined directly
+if (process.env.AGENT_SECRET_KEY && process.env.AGENT_SECRET_KEY_ARN) {
+  // Both set — record as error immediately so configPromise rejects and
+  // the proxy throws the right message before awaiting.
+  _configError = new Error('Cannot specify both AGENT_SECRET_KEY and AGENT_SECRET_KEY_ARN.');
+  process.stderr.write(
+    '❌ [Config] Cannot specify both AGENT_SECRET_KEY and AGENT_SECRET_KEY_ARN.\n'
+  );
+} else if (process.env.AGENT_SECRET_KEY && !process.env.AGENT_SECRET_KEY_ARN) {
   try {
-    assertSecretConfigCompatibility();
-
-    if (process.env.AGENT_SECRET_KEY_ARN) {
-      _config = await loadConfig();
-    } else if (process.env.AGENT_SECRET_KEY) {
-      _config = loadConfigSync();
-    } else {
-      _config = await loadConfig();
-    }
-
-    return _config;
+    _config = loadConfigSync();
   } catch (err: any) {
     _configError = err;
-    throw err;
   }
 }
+
+function ensureConfigPromise(): Promise<AgentConfig> {
+  if (_config) return Promise.resolve(_config);
+  if (_configError) return Promise.reject(_configError);
+  if (!__configPromise) {
+    __configPromise = (async () => {
+      try {
+        _config = await loadConfig();
+        return _config;
+      } catch (err: any) {
+        _configError = err;
+        throw err;
+      }
+    })();
+  }
+  return __configPromise;
+}
+
+let __configPromise: Promise<AgentConfig> | null = null;
 
 export const configPromise = {
   then: <TResult1 = AgentConfig, TResult2 = never>(
     onfulfilled?: ((value: AgentConfig) => TResult1 | PromiseLike<TResult1>) | null,
-    onrejected?: ((reason: any) => TResult2 | PromiseLike<TResult2>) | null
-  ) => initializeConfig().then(onfulfilled, onrejected),
-  catch: <TResult = never>(onrejected?: ((reason: any) => TResult | PromiseLike<TResult>) | null) =>
-    initializeConfig().catch(onrejected),
-  finally: (onfinally?: (() => void) | null) => initializeConfig().finally(onfinally),
-} as Promise<AgentConfig>;
-
-const FALLBACK_CONFIG: AgentConfig = {
-  STELLAR_NETWORK: 'testnet',
-  HORIZON_URL: 'https://horizon-testnet.stellar.org',
-  SOROBAN_RPC_URL: 'https://soroban-testnet.stellar.org',
-  DB_PATH: './agent.db',
-  X402_ASSET_CODE: 'USDC',
-  X402_ASSET_ISSUER: 'GA5ZSEJYB37JRC5AVCIA5MOP4RHTM335X2KGX3IHOJAPP5RE34K4KZVN',
-  AGENT_SPENDING_LIMIT: '100',
-  MAX_RETRIES: 3,
-  RETRY_DELAY_MS: 1500,
-  AGENT_PUBLIC_KEY: Keypair.random().publicKey(),
-  agentKeypair: () => Keypair.random(),
-  SPENDING_WINDOW_MS: 86_400_000,
-  ACCOUNT_CACHE_TTL_MS: 30_000,
-  RPC_TIMEOUT_MS: 30_000,
-  TOML_CACHE_TTL_MS: 300_000,
-  MAX_X402_PAYMENTS_PER_MINUTE: 10,
-  X402_NONCE_TTL_MS: 24 * 60 * 60 * 1_000,
-  MAX_SOROBAN_FEE_STROOPS: 1_000_000,
-  MAX_CONCURRENT_TASKS: 10,
-  QUEUE_CAPACITY: 0,
-  HEALTH_PORT: 3000,
-};
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null
+  ) => ensureConfigPromise().then(onfulfilled, onrejected),
+  catch: <TResult = never>(
+    onrejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null
+  ) => ensureConfigPromise().catch(onrejected),
+  finally: (onfinally?: (() => void) | null) => ensureConfigPromise().finally(onfinally),
+} as PromiseLike<AgentConfig>;
 
 export const config = new Proxy({} as AgentConfig, {
   get(target, prop, receiver) {
@@ -640,9 +645,14 @@ export const config = new Proxy({} as AgentConfig, {
  * Any single operation/payment attempting to exceed this value will be blocked
  * by the spending limit assertion before submission.
  */
-export const MAINNET_SPENDING_CAP = 10000;
-
 // ─── Compile-time encapsulation guard ────────────────────────────────────────
+// AgentConfig intentionally omits AGENT_SECRET_KEY.
+// The TypeScript error below proves AGENT_SECRET_KEY is NOT on the AgentConfig
+// type. The false && guard ensures this line is dead code at runtime — the
+// typeof check prevents a ReferenceError since _configTypeGuard is declaration-
+// only and has no runtime binding after TypeScript erasure.
+// @ts-expect-error — AGENT_SECRET_KEY must NOT be accessible on AgentConfig
+if (false) { void (undefined as any as AgentConfig).AGENT_SECRET_KEY; }
 // AgentConfig intentionally omits AGENT_SECRET_KEY via Omit<RawEnv, "AGENT_SECRET_KEY">.
 // The TypeScript assertion below is intentional — it proves AGENT_SECRET_KEY is NOT
 // on the AgentConfig type without emitting any runtime value access.

@@ -62,6 +62,7 @@ export class ValidationError extends StructuredError {
 }
 
 export class RateLimitError extends StructuredError {
+  readonly retryAfterSeconds: number | undefined;
   readonly retryAfterSeconds?: number | undefined;
 
   constructor(message: string, retryAfterSeconds?: number, cause?: unknown) {
@@ -79,25 +80,18 @@ export class UnauthorizedError extends StructuredError {
 }
 
 export class ContractError extends StructuredError {
+  readonly contractId: string | undefined;
   readonly contractId?: string | undefined;
 
   constructor(message: string, contractId?: string, cause?: unknown) {
-    const isContractId =
-      typeof contractId === 'string' && contractId.length === 56 && contractId.startsWith('C');
-    const actualContractId = isContractId
-      ? contractId
-      : cause !== undefined
-        ? contractId
-        : undefined;
-    const actualCause = cause !== undefined ? cause : isContractId ? undefined : contractId;
-
-    super(message, ErrorType.ContractError, actualCause);
-    this.contractId = actualContractId;
+    super(message, ErrorType.ContractError, cause);
+    this.contractId = contractId;
     Object.setPrototypeOf(this, ContractError.prototype);
   }
 }
 
 export class TransactionFailureError extends StructuredError {
+  readonly txHash: string | undefined;
   readonly txHash?: string | undefined;
 
   constructor(message: string, txHash?: string, cause?: unknown) {

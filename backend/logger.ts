@@ -1,1 +1,1 @@
-export * from './utils/logger';
+export { logger, createLogger, generateCorrelationId, redactSecrets } from './utils/logger';
