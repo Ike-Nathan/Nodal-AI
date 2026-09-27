@@ -512,19 +512,24 @@ function parseConfigAndDerive(): AgentConfig {
 }
 
 function loadConfigSync(): AgentConfig {
+  assertSecretConfigCompatibility();
   if (process.env.AGENT_SECRET_KEY_ARN) {
     throw new Error('Cannot load configuration synchronously when AGENT_SECRET_KEY_ARN is set.');
   }
   return parseConfigAndDerive();
 }
 
-export async function loadConfig(): Promise<AgentConfig> {
+function assertSecretConfigCompatibility(): void {
   if (process.env.AGENT_SECRET_KEY && process.env.AGENT_SECRET_KEY_ARN) {
     process.stderr.write(
       '❌ [Config] Cannot specify both AGENT_SECRET_KEY and AGENT_SECRET_KEY_ARN.\n'
     );
     process.exit(1);
   }
+}
+
+export async function loadConfig(): Promise<AgentConfig> {
+  assertSecretConfigCompatibility();
 
   if (process.env.AGENT_SECRET_KEY_ARN) {
     try {
@@ -616,7 +621,20 @@ export const config = new Proxy({} as AgentConfig, {
       throw _configError;
     }
     if (!_config) {
-      throw new Error('Configuration has not been initialized yet. Await configPromise first.');
+      const hasAnyEnvConfig = Object.keys(process.env).some((key) =>
+        ['HORIZON_URL', 'SOROBAN_RPC_URL', 'AGENT_SECRET_KEY', 'X402_ASSET_ISSUER'].includes(key)
+      );
+
+      if (!hasAnyEnvConfig) {
+        return Reflect.get(FALLBACK_CONFIG, prop, receiver);
+      }
+
+      try {
+        _config = loadConfigSync();
+      } catch (err: any) {
+        _configError = err;
+        throw err;
+      }
     }
     return Reflect.get(_config, prop, receiver);
   },
