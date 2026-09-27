@@ -463,7 +463,6 @@ function parseConfigAndDerive(): AgentConfig {
   // ── Build the config object — secret key stays in closure only ────────────
   const {
     AGENT_SECRET_KEY: _secret,
-    AGENT_PUBLIC_KEY: _rawPub,
     ALLOWED_X402_ORIGINS,
     AGENT_SECRET_KEY_ARN,
     OTLP_ENDPOINT,
@@ -477,7 +476,6 @@ function parseConfigAndDerive(): AgentConfig {
   // Derive the keypair once at startup. agentKeypair returns this cached instance
   // on every call, avoiding repeated Ed25519 derivation.
   const _keypair = Keypair.fromSecret(_secret);
-  const _secretRef = _secret;
 
   const cfg: AgentConfig = {
     ...rest,
@@ -497,12 +495,6 @@ function parseConfigAndDerive(): AgentConfig {
     // Secret is captured in closure; never on the object
     agentKeypair: () => _keypair,
   };
-
-  // Allow GC of the secret string now that the keypair is materialised.
-  // (JS strings are immutable, but this signals intent.)
-  (() => {
-    const _ = _secretRef;
-  })();
 
   // Startup banner — only safe fields
   process.stdout.write(
